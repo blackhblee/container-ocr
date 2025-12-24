@@ -1,0 +1,19 @@
+# Qwen3-VL and CUDA support
+transformers>=4.37.0
+pillow>=10.0.0
+accelerate>=0.20.0
+qwen-vl-utils
+opencv-python>=4.8.0
+sentencepiece
+
+# PyTorch - CUDA version (Windows GPU environment)
+# For GPU environment, install with:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# 
+# For CPU-only environment (Mac, etc.):
+# pip install torch torchvision torchaudio
+#
+# When installing from requirements.txt:
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
