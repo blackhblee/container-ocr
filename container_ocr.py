@@ -262,6 +262,7 @@ import torch
 import re
 from typing import Union, List, Dict
 from pathlib import Path
+from datetime import datetime
 
 
 class ContainerOCR:
@@ -274,20 +275,20 @@ class ContainerOCR:
         Args:
             model_name: 사용할 Qwen3-VL 모델
         """
-        print(f"Qwen3-VL 초기화 중: {model_name}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Qwen3-VL 초기화 중: {model_name}")
         
         # GPU 사용 가능 여부 확인
         if torch.cuda.is_available():
             self.device = "cuda"
             gpu_name = torch.cuda.get_device_name(0)
-            print(f"✓ CUDA 감지됨: {gpu_name}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✓ CUDA 감지됨: {gpu_name}")
             torch_dtype = torch.bfloat16  # GPU에서는 bfloat16 사용 (더 빠름)
         else:
             self.device = "cpu"
-            print(f"⚠ CUDA를 사용할 수 없습니다. CPU 모드로 실행합니다.")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠ CUDA를 사용할 수 없습니다. CPU 모드로 실행합니다.")
             torch_dtype = torch.float32
         
-        print(f"사용 디바이스: {self.device}, dtype: {torch_dtype}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 사용 디바이스: {self.device}, dtype: {torch_dtype}")
         
         # 모델과 프로세서 로드
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
@@ -300,7 +301,7 @@ class ContainerOCR:
         # Inference mode로 설정 (속도 향상)
         self.model.eval()
         
-        print("Qwen3-VL 초기화 완료!")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Qwen3-VL 초기화 완료!")
     
     def extract_container_number(self, image_path: Union[str, Path]) -> Dict[str, any]:
         """
@@ -321,21 +322,29 @@ class ContainerOCR:
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image_path_str},
-                    {"type": "text", "text": """Find the ISO 6346 shipping container number in this image. Even if the text is split across multiple lines or has irregular spacing, extract it correctly.
+                    {"type": "text", "text": """You are a precise OCR system for shipping container numbers.
 
-The container number consists of:
-- Owner code: exactly 4 uppercase letters
+**CRITICAL RULES:**
+1. ONLY extract text that is ACTUALLY VISIBLE in this specific image
+2. DO NOT make up, guess, or generate random container numbers
+3. DO NOT use example numbers or placeholders
+4. If you cannot clearly see a complete container number, respond with: NONE
+
+**Container Number Format (ISO 6346):**
+- Owner code: exactly 4 UPPERCASE letters
 - Serial number: exactly 6 digits
 - Check digit: exactly 1 digit
+- Example format: ABCD 123456 7
 
-Examples: ABCU 123456 7 (THIS IS AN EXAMPLE)
+**Instructions:**
+- Look carefully at the image for text painted on the container
+- The text may be split across multiple lines or have irregular spacing
+- Extract ONLY what you can actually see in the image
+- Combine the parts to form: XXXX NNNNNN N
+- If the container number is incomplete, unclear, or not visible: respond with NONE
+- Your response must be ONLY the container number or NONE, nothing else
 
-Important: 
-- Ignore line breaks and irregular spacing in the image
-- The serial number is always 6 digits (not more, not less)
-- Return ONLY the container number in format: XXXX NNNNNN N
-- If no container number is found, respond with: NONE
-- Do not include any other text in your response"""}
+**What you see in THIS image:**"""}
                 ]
             }
         ]
@@ -371,7 +380,7 @@ Important:
             clean_up_tokenization_spaces=False
         )[0]
         
-        print(f"[DEBUG] 모델 출력: '{response}'")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 모델 출력: '{response}'")
         
         # 컨테이너 번호 파싱
         container_info = self._parse_container_number(response, [response])
@@ -380,6 +389,120 @@ Important:
         container_info['image_path'] = image_path_str
         
         return container_info
+    
+    def extract_container_number_batch(self, image_paths: List[Union[str, Path]]) -> List[Dict[str, any]]:
+        """
+        여러 이미지에서 컨테이너 일련번호를 한 번에 추출 (GPU 배치 추론)
+        
+        Args:
+            image_paths: 컨테이너 이미지 경로 리스트
+            
+        Returns:
+            추출된 컨테이너 정보 딕셔너리 리스트
+        """
+        if not image_paths:
+            return []
+        
+        # Path 객체를 문자열로 변환
+        image_path_strs = [str(p) for p in image_paths]
+        
+        # 각 이미지에 대한 메시지 생성
+        all_messages = []
+        prompt_text = """You are a precise OCR system for shipping container numbers.
+
+**CRITICAL RULES:**
+1. ONLY extract text that is ACTUALLY VISIBLE in this specific image
+2. DO NOT make up, guess, or generate random container numbers
+3. DO NOT use example numbers or placeholders
+4. If you cannot clearly see a complete container number, respond with: NONE
+
+**Container Number Format (ISO 6346):**
+- Owner code: exactly 4 UPPERCASE letters
+- Serial number: exactly 6 digits
+- Check digit: exactly 1 digit
+- Example format: ABCD 123456 7
+
+**Instructions:**
+- Look carefully at the image for text painted on the container
+- The text may be split across multiple lines or have irregular spacing
+- Extract ONLY what you can actually see in the image
+- Combine the parts to form: XXXX NNNNNN N
+- If the container number is incomplete, unclear, or not visible: respond with NONE
+- Your response must be ONLY the container number or NONE, nothing else
+
+**What you see in THIS image:**"""
+        
+        for image_path_str in image_path_strs:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image_path_str},
+                        {"type": "text", "text": prompt_text}
+                    ]
+                }
+            ]
+            all_messages.append(messages)
+        
+        # 배치로 입력 준비
+        texts = []
+        all_image_inputs = []
+        all_video_inputs = []
+        
+        for messages in all_messages:
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            texts.append(text)
+            image_inputs, video_inputs = process_vision_info(messages)
+            all_image_inputs.extend(image_inputs if image_inputs else [])
+            all_video_inputs.extend(video_inputs if video_inputs else [])
+        
+        # 배치로 프로세싱
+        inputs = self.processor(
+            text=texts,
+            images=all_image_inputs if all_image_inputs else None,
+            videos=all_video_inputs if all_video_inputs else None,
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to(self.device)
+        
+        # 배치 추론
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] GPU 배치 추론 시작: {len(image_paths)}개 이미지")
+        for idx, path in enumerate(image_path_strs, 1):
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   [{idx}] {Path(path).name}")
+        
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **inputs, 
+                max_new_tokens=50
+            )
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] GPU 배치 추론 완료")
+        
+        # 각 이미지별로 결과 디코딩
+        results = []
+        for idx, (image_path_str, in_ids, out_ids) in enumerate(zip(image_path_strs, inputs.input_ids, generated_ids)):
+            # 입력 제거하고 디코딩
+            generated_trimmed = out_ids[len(in_ids):]
+            response = self.processor.decode(
+                generated_trimmed, 
+                skip_special_tokens=True, 
+                clean_up_tokenization_spaces=False
+            )
+            
+            filename = Path(image_path_str).name
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] [{idx+1}/{len(image_paths)}] {filename}: '{response}'")
+            
+            # 컨테이너 번호 파싱
+            container_info = self._parse_container_number(response, [response])
+            container_info['raw_output'] = response
+            container_info['all_detected_text'] = [response]
+            container_info['image_path'] = image_path_str
+            
+            results.append(container_info)
+        
+        return results
     
     def _calculate_check_digit(self, owner_code: str, serial_number: str) -> int:
         """
@@ -455,7 +578,7 @@ Important:
                 is_valid = (int(check_digit) == calculated_check_digit)
                 
                 if not is_valid:
-                    print(f"[WARNING] 체크 디지트 불일치: 인식된={check_digit}, 계산된={calculated_check_digit}")
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARNING] 체크 디지트 불일치: 인식된={check_digit}, 계산된={calculated_check_digit}")
                 
                 return {
                     'container_number': f"{owner_code} {serial_number} {check_digit}",
@@ -480,6 +603,8 @@ Important:
     def process_batch(self, image_paths: List[Union[str, Path]]) -> List[Dict[str, any]]:
         """
         여러 이미지를 배치로 처리
+        GPU 모드: 배치 추론으로 한 번에 처리
+        CPU 모드: 순차적으로 하나씩 처리
         
         Args:
             image_paths: 이미지 경로 리스트
@@ -487,34 +612,34 @@ Important:
         Returns:
             추출된 컨테이너 정보 리스트
         """
-        results = []
-        for i, image_path in enumerate(image_paths, 1):
-            print(f"\n처리 중 ({i}/{len(image_paths)}): {image_path}")
-            try:
-                result = self.extract_container_number(image_path)
-                results.append(result)
-                
-                if result['found']:
-                    valid_status = "✓" if result.get('check_digit_valid', False) else "✗"
-                    print(f"✓ 발견: {result['container_number']} (체크 디지트: {valid_status})")
-                    if not result.get('check_digit_valid', False):
-                        print(f"  경고: 체크 디지트가 올바르지 않습니다 (계산값: {result.get('calculated_check_digit', 'N/A')})")
-                else:
-                    print(f"✗ 컨테이너 번호를 찾지 못했습니다")
-                    print(f"  인식된 텍스트: {result['all_detected_text']}")
-                    print(f"  결합 텍스트: {result['raw_output']}")
-                    
-            except Exception as e:
-                print(f"✗ 오류 발생: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                results.append({
-                    'image_path': str(image_path),
-                    'found': False,
-                    'error': str(e)
-                })
+        if not image_paths:
+            return []
         
-        return results
+        try:
+            # GPU 사용 시: 배치 추론으로 한 번에 처리
+            if self.device == "cuda":
+                results = self.extract_container_number_batch(image_paths)
+                return results
+            
+            # CPU 사용 시: 순차적으로 하나씩 처리
+            else:
+                results = []
+                for image_path in image_paths:
+                    result = self.extract_container_number(image_path)
+                    results.append(result)
+                return results
+                    
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✗ 배치 처리 오류 발생: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # 오류 발생 시 빈 결과 반환
+            return [{
+                'image_path': str(image_path),
+                'found': False,
+                'error': str(e)
+            } for image_path in image_paths]
 
 
 def main():
@@ -539,25 +664,25 @@ def main():
     result = ocr.extract_container_number(args.image_path)
     
     # 결과 출력
-    print("\n" + "="*60)
-    print("컨테이너 번호 인식 결과")
-    print("="*60)
-    print(f"이미지: {result['image_path']}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] \n" + "="*60)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 컨테이너 번호 인식 결과")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] " + "="*60)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 이미지: {result['image_path']}")
     
     if result['found']:
         valid_icon = "✓" if result.get('check_digit_valid', False) else "✗"
-        print(f"\n✓ 컨테이너 번호 발견!")
-        print(f"  - 전체 번호: {result['container_number']}")
-        print(f"  - 소유자 코드: {result['owner_code']}")
-        print(f"  - 일련번호: {result['serial_number']}")
-        print(f"  - 체크 디지트: {result['check_digit']} ({valid_icon} {'유효' if result.get('check_digit_valid') else '무효'})")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] \n✓ 컨테이너 번호 발견!")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   - 전체 번호: {result['container_number']}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   - 소유자 코드: {result['owner_code']}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   - 일련번호: {result['serial_number']}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   - 체크 디지트: {result['check_digit']} ({valid_icon} {'유효' if result.get('check_digit_valid') else '무효'})")
         if not result.get('check_digit_valid', False):
-            print(f"  - 올바른 체크 디지트: {result.get('calculated_check_digit', 'N/A')}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   - 올바른 체크 디지트: {result.get('calculated_check_digit', 'N/A')}")
     else:
-        print(f"\n✗ 컨테이너 번호를 찾을 수 없습니다")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] \n✗ 컨테이너 번호를 찾을 수 없습니다")
     
-    print(f"\n원본 출력:\n{result['raw_output']}")
-    print("="*60)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] \n원본 출력:\n{result['raw_output']}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] " + "="*60)
 
 
 if __name__ == "__main__":
