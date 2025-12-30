@@ -573,6 +573,11 @@ class ContainerOCR:
                 serial_number = match.group(2)
                 check_digit = match.group(3)
                 
+                # 4번째 자리 검증 (U/Z/J/R만 가능)
+                if owner_code[3] not in ['U', 'Z', 'J', 'R']:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARNING] 잘못된 카테고리 코드: {owner_code[3]} (U/Z/J/R만 가능)")
+                    continue
+                
                 # ISO 6346 체크 디지트 검증
                 calculated_check_digit = self._calculate_check_digit(owner_code, serial_number)
                 is_valid = (int(check_digit) == calculated_check_digit)
@@ -640,6 +645,190 @@ class ContainerOCR:
                 'found': False,
                 'error': str(e)
             } for image_path in image_paths]
+    
+    def analyze_truck_containers(self, image_paths: List[Union[str, Path]]) -> Dict[str, any]:
+        """
+        트럭의 모든 이미지를 모델에 입력하여 컨테이너 구성을 종합 분석
+        
+        Args:
+            image_paths: 한 트럭의 모든 이미지 경로 리스트
+            
+        Returns:
+            컨테이너 분석 결과 (타입, 개수, 번호, 위치 등)
+        """
+        from collections import defaultdict
+        
+        # Path 객체를 문자열로 변환
+        image_path_strs = [str(p) for p in image_paths]
+        
+        # 여러 이미지를 포함한 프롬프트 구성
+        image_contents = [{"type": "image", "image": img_path} for img_path in image_path_strs[:30]]  # 최대 30개까지
+        
+        prompt_text = """You are analyzing images of a shipping truck to identify container numbers and configuration.
+
+**Your task:**
+Analyze all these images of the SAME truck taken from different angles (left, right, front, rear, top, etc.) and determine:
+1. How many containers are on this truck? (0, 1, or 2)
+2. What are the container numbers? (ISO 6346 format: XXXX NNNNNN N)
+3. If there is 1 container: Is it a 40-foot container OR a 20-foot container?
+4. If it's a single 20-foot container: Is it positioned at the FRONT or REAR of the truck?
+5. If there are 2 containers: Both must be 20-foot containers
+
+**CRITICAL RULES:**
+- ONLY extract container numbers that are ACTUALLY VISIBLE in these images
+- DO NOT make up or guess container numbers
+- Container owner code (4 letters) must end with U, Z, J, or R
+- The 4th letter MUST be one of: U, Z, J, R
+- If you cannot clearly see a container number, do not include it
+
+**Response format (JSON only):**
+{
+  "container_count": 0 or 1 or 2,
+  "container_type": "none" or "40ft_single" or "20ft_single_front" or "20ft_single_rear" or "20ft_double",
+  "containers": [
+    {
+      "number": "XXXX NNNNNN N",
+      "position": "full" or "front" or "rear"
+    }
+  ]
+}
+
+**Examples:**
+- 40-foot container: {"container_count": 1, "container_type": "40ft_single", "containers": [{"number": "MSDU 796179 8", "position": "full"}]}
+- 20-foot at front: {"container_count": 1, "container_type": "20ft_single_front", "containers": [{"number": "MSDU 796179 8", "position": "front"}]}
+- 20-foot at rear: {"container_count": 1, "container_type": "20ft_single_rear", "containers": [{"number": "MSDU 796179 8", "position": "rear"}]}
+- Two 20-foot: {"container_count": 2, "container_type": "20ft_double", "containers": [{"number": "MSDU 796179 8", "position": "front"}, {"number": "ABCU 123456 7", "position": "rear"}]}
+- No containers: {"container_count": 0, "container_type": "none", "containers": []}
+
+Respond with ONLY the JSON, no other text."""
+        
+        content = image_contents + [{"type": "text", "text": prompt_text}]
+        
+        messages = [{"role": "user", "content": content}]
+        
+        # 입력 준비
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self.processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to(self.device)
+        
+        # 추론
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 트럭 전체 분석 시작: {len(image_path_strs)}개 이미지 (모델에 입력: {len(image_contents)}개)")
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **inputs, 
+                max_new_tokens=200  # JSON 응답을 위해 충분한 토큰
+            )
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 트럭 전체 분석 완료")
+        
+        # 디코딩
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        response = self.processor.batch_decode(
+            generated_ids_trimmed, 
+            skip_special_tokens=True, 
+            clean_up_tokenization_spaces=False
+        )[0]
+        
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 모델 응답: {response}")
+        
+        # JSON 파싱 시도
+        try:
+            import json
+            # JSON 부분만 추출 (```json ... ``` 형식일 수 있음)
+            json_start = response.find('{')
+            json_end = response.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                json_str = response[json_start:json_end]
+                result = json.loads(json_str)
+                
+                # 컨테이너 번호 검증 및 체크 디지트 확인
+                validated_containers = []
+                for container in result.get('containers', []):
+                    container_num = container.get('number', '')
+                    # 파싱
+                    parsed = self._parse_container_number(container_num)
+                    if parsed['found'] and parsed['check_digit_valid']:
+                        validated_containers.append({
+                            'number': container_num.replace(' ', ''),
+                            'position': container.get('position', 'unknown'),
+                            'check_digit_valid': True
+                        })
+                    else:
+                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARNING] 무효한 컨테이너 번호 제외: {container_num}")
+                
+                return {
+                    'container_count': len(validated_containers),
+                    'container_type': result.get('container_type', 'unknown'),
+                    'containers': validated_containers,
+                    'raw_response': response
+                }
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARNING] JSON 파싱 실패: {str(e)}")
+        
+        # JSON 파싱 실패 시 폴백: 기존 방식으로 처리
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] 폴백: 개별 이미지 분석 방식 사용")
+        return self._analyze_truck_containers_fallback(image_paths)
+    
+    def _analyze_truck_containers_fallback(self, image_paths: List[Union[str, Path]]) -> Dict[str, any]:
+        """
+        폴백 방식: 개별 이미지를 분석하여 감지 횟수 기반으로 판단
+        """
+        from collections import defaultdict
+        
+        # 모든 이미지에서 컨테이너 번호 추출
+        all_results = self.process_batch(image_paths)
+        
+        # 유효한 컨테이너 번호와 감지 횟수 수집
+        container_detections = defaultdict(lambda: {'count': 0, 'images': []})
+        
+        for img_path, result in zip(image_paths, all_results):
+            if result.get('found') and result.get('check_digit_valid'):
+                container_num = result['container_number'].replace(' ', '')
+                container_detections[container_num]['count'] += 1
+                container_detections[container_num]['images'].append(Path(img_path).name)
+        
+        # 감지 횟수가 많은 순으로 정렬하여 상위 2개만 선택
+        valid_containers = sorted(
+            container_detections.items(),
+            key=lambda x: x[1]['count'],
+            reverse=True
+        )[:2]
+        
+        # 분석 결과
+        containers = []
+        for i, (container_num, info) in enumerate(valid_containers):
+            position = 'front' if i == 0 else 'rear'  # 첫 번째는 앞, 두 번째는 뒤로 가정
+            containers.append({
+                'number': container_num,
+                'position': position,
+                'detection_count': info['count'],
+                'images': info['images'],
+                'check_digit_valid': True
+            })
+        
+        container_count = len(containers)
+        if container_count == 0:
+            container_type = 'none'
+        elif container_count == 1:
+            container_type = 'single'
+        else:
+            container_type = 'double'
+        
+        return {
+            'container_count': container_count,
+            'container_type': container_type,
+            'containers': containers
+        }
 
 
 def main():

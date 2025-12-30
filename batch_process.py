@@ -61,36 +61,54 @@ def process_folder(folder_path: str, output_file: str = "results.txt"):
         images = truck_images[truck_id]
         print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 처리 중: 트럭 {truck_id} ({len(images)}개 이미지)")
         
-        valid_containers = set()  # 유효한 컨테이너 번호 (중복 제거)
+        # 트럭 전체 이미지 분석
+        analysis = ocr.analyze_truck_containers(images)
         
-        # 배치 단위로 이미지 처리
-        for i in range(0, len(images), batch_size):
-            batch = images[i:i + batch_size]
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   배치 처리: {len(batch)}개 이미지 ({i+1}~{min(i+batch_size, len(images))})")
-            
-            # 배치로 한 번에 처리
-            results = ocr.process_batch(batch)
-            
-            # 결과 처리
-            for img_path, result in zip(batch, results):
-                if result.get('found', False):
-                    # container_ocr에서 이미 체크디지트 검증을 수행함
-                    is_valid = result.get('check_digit_valid', False)
-                    container_num = result['container_number'].replace(' ', '')  # 공백 제거
-                    
-                    if is_valid:
-                        valid_containers.add(container_num)
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]     ✓ {img_path.name}: {result['container_number']} (유효)")
-                    else:
-                        calculated = result.get('calculated_check_digit', 'N/A')
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]     ✗ {img_path.name}: {result['container_number']} (체크디지트 오류, 계산값: {calculated})")
-                else:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]     - {img_path.name}: 인식 실패 (raw: {result.get('raw_output', 'N/A')})")
+        # 분석 결과 출력
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 📊 분석 결과:")
         
-        # 최대 2개까지만 저장
-        if valid_containers:
-            truck_containers[truck_id] = sorted(list(valid_containers))[:2]
+        type_description = {
+            'none': '컨테이너 없음',
+            '40ft_single': '40피트 1개',
+            '20ft_single_front': '20피트 1개 (앞쪽)',
+            '20ft_single_rear': '20피트 1개 (뒤쪽)',
+            '20ft_double': '20피트 2개',
+            'single': '1개 (40피트 또는 20피트)',
+            'double': '20피트 2개',
+            'unknown': '알 수 없음'
+        }.get(analysis['container_type'], analysis['container_type'])
+        
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   - 컨테이너 타입: {type_description}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   - 감지된 컨테이너 수: {analysis['container_count']}")
+        
+        if analysis['container_count'] > 0:
+            for i, container in enumerate(analysis['containers'], 1):
+                position_str = {
+                    'full': '40피트 (전체)',
+                    'front': '앞쪽',
+                    'rear': '뒤쪽',
+                    'unknown': '위치 미상'
+                }.get(container.get('position', 'unknown'), container.get('position', 'unknown'))
+                
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   [{i}] {container['number']}")
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]       위치: {position_str}")
+                
+                # detection_count가 있으면 출력 (폴백 방식)
+                if 'detection_count' in container:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]       감지 횟수: {container['detection_count']}회")
+                if 'images' in container:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]       감지 이미지: {', '.join(container['images'][:3])}{'...' if len(container['images']) > 3 else ''}")
+            
+            # 컨테이너 번호만 저장 (위치 순서대로: front → full → rear)
+            containers_sorted = sorted(
+                analysis['containers'],
+                key=lambda x: (0 if x.get('position') == 'front' else 1 if x.get('position') == 'full' else 2)
+            )
+            truck_containers[truck_id] = [c['number'] for c in containers_sorted]
+            
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 📦 트럭 {truck_id}: {len(truck_containers[truck_id])}개 컨테이너 확정")
+        else:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ 트럭 {truck_id}: 유효한 컨테이너를 찾지 못했습니다")
     
     # 결과 요약
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] " + "="*60)
