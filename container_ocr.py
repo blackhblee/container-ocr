@@ -1,262 +1,9 @@
-# """
-# 컨테이너 일련번호 인식 시스템
-# Phi-3-Vision을 사용하여 컨테이너 이미지에서 일련번호를 추출합니다.
-# """
-
-# from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
-# from qwen_vl_utils import process_vision_info
-# from PIL import Image
-# import torch
-# import re
-# from typing import Union, List, Dict
-# from pathlib import Path
-
-
-# class ContainerOCR:
-#     """컨테이너 일련번호를 인식하는 클래스"""
-    
-#     def __init__(self, model_name: str = "Qwen/Qwen2-VL-2B-Instruct"):
-#         """
-#         Qwen2-VL 초기화
-        
-#         Args:
-#             model_name: 사용할 Qwen2-VL 모델
-#         """
-#         print(f"Qwen2-VL 초기화 중: {model_name}")
-        
-#         # CPU 사용 (MPS 호환성 문제)
-#         self.device = "cpu"
-#         print(f"사용 디바이스: {self.device}")
-        
-#         # 모델과 프로세서 로드
-#         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-#             model_name,
-#             torch_dtype=torch.float32,
-#             device_map=self.device
-#         )
-#         self.processor = AutoProcessor.from_pretrained(model_name)
-        
-#         # Inference mode로 설정 (속도 향상)
-#         self.model.eval()
-        
-#         print("Qwen2-VL 초기화 완료!")
-    
-#     def extract_container_number(self, image_path: Union[str, Path]) -> Dict[str, any]:
-#         """
-#         이미지에서 컨테이너 일련번호를 추출
-        
-#         Args:
-#             image_path: 컨테이너 이미지 경로
-            
-#         Returns:
-#             추출된 컨테이너 정보 딕셔너리
-#         """
-#         # Path 객체를 문자열로 변환
-#         image_path_str = str(image_path)
-        
-#         # 프롬프트 구성 - ISO 6346 규격 명시
-#         messages = [
-#             {
-#                 "role": "user",
-#                 "content": [
-#                     {"type": "image", "image": image_path_str},
-#                     {"type": "text", "text": """Find the ISO 6346 shipping container number in this image. Even if the text is split across multiple lines or has irregular spacing, extract it correctly.
-
-# The container number consists of:
-# - Owner code: exactly 4 uppercase letters
-# - Serial number: exactly 6 or 7 digits
-# - Check digit: exactly 1 digit
-
-# Examples: FCIU 535685 9, HMMU 203019 6, MOSU 044197 0
-
-# Important: 
-# - Ignore line breaks and irregular spacing in the image
-# - The serial number is always 6 or 7 digits (not more, not less)
-# - Return ONLY the container number in format: XXXX NNNNNN N or XXXX NNNNNNN N
-# - Do not include any other text in your response"""}
-#                 ]
-#             }
-#         ]
-        
-#         # 입력 준비
-#         text = self.processor.apply_chat_template(
-#             messages, tokenize=False, add_generation_prompt=True
-#         )
-#         image_inputs, video_inputs = process_vision_info(messages)
-#         inputs = self.processor(
-#             text=[text],
-#             images=image_inputs,
-#             videos=video_inputs,
-#             padding=True,
-#             return_tensors="pt",
-#         )
-#         inputs = inputs.to(self.device)
-        
-#         # 추론 - 짧은 출력으로 속도 향상
-#         with torch.no_grad():
-#             generated_ids = self.model.generate(
-#                 **inputs, 
-#                 max_new_tokens=50  # 컸테이너 번호는 짧으므로 축소
-#             )
-        
-#         # 입력 제거하고 디코딩
-#         generated_ids_trimmed = [
-#             out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-#         ]
-#         response = self.processor.batch_decode(
-#             generated_ids_trimmed, 
-#             skip_special_tokens=True, 
-#             clean_up_tokenization_spaces=False
-#         )[0]
-        
-#         print(f"[DEBUG] 모델 출력: '{response}'")
-        
-#         # 컨테이너 번호 파싱
-#         container_info = self._parse_container_number(response, [response])
-#         container_info['raw_output'] = response
-#         container_info['all_detected_text'] = [response]
-#         container_info['image_path'] = image_path_str
-        
-#         return container_info
-    
-#     def _parse_container_number(self, text: str, text_list: List[str] = None) -> Dict[str, str]:
-#         """
-#         모델 출력에서 ISO 6346 규격 컨테이너 번호를 파싱
-        
-#         Args:
-#             text: 모델의 출력 텍스트 (결합된 전체 텍스트)
-#             text_list: 개별 인식된 텍스트 리스트
-            
-#         Returns:
-#             파싱된 컨테이너 정보
-#         """
-#         # 점이나 특수문자를 공백으로 치환
-#         cleaned = text.replace('.', ' ').replace(',', ' ').replace('-', ' ').replace('_', ' ')
-        
-#         # ISO 6346 규격 패턴 (4글자 + 6~7숫자 + 1체크디지트)
-#         patterns = [
-#             r'([A-Z]{4})\s*(\d{6})\s*(\d)',    # 4글자 + 6숫자 + 1체크디지트
-#             r'([A-Z]{4})\s*(\d{7})\s*(\d)',    # 4글자 + 7숫자 + 1체크디지트
-#         ]
-        
-#         for pattern in patterns:
-#             match = re.search(pattern, cleaned)
-#             if match:
-#                 owner_code = match.group(1)
-#                 serial_number = match.group(2)
-#                 check_digit = match.group(3)
-                
-#                 return {
-#                     'container_number': f"{owner_code} {serial_number} {check_digit}",
-#                     'owner_code': owner_code,
-#                     'serial_number': serial_number,
-#                     'check_digit': check_digit,
-#                     'found': True
-#                 }
-        
-#         return {
-#             'container_number': None,
-#             'owner_code': None,
-#             'serial_number': None,
-#             'check_digit': None,
-#             'found': False
-#         }
-    
-#     def process_batch(self, image_paths: List[Union[str, Path]]) -> List[Dict[str, any]]:
-#         """
-#         여러 이미지를 배치로 처리
-        
-#         Args:
-#             image_paths: 이미지 경로 리스트
-            
-#         Returns:
-#             추출된 컨테이너 정보 리스트
-#         """
-#         results = []
-#         for i, image_path in enumerate(image_paths, 1):
-#             print(f"\n처리 중 ({i}/{len(image_paths)}): {image_path}")
-#             try:
-#                 result = self.extract_container_number(image_path)
-#                 results.append(result)
-                
-#                 if result['found']:
-#                     print(f"✓ 발견: {result['container_number']}")
-#                 else:
-#                     print(f"✗ 컨테이너 번호를 찾지 못했습니다")
-#                     print(f"  인식된 텍스트: {result['all_detected_text']}")
-#                     print(f"  결합 텍스트: {result['raw_output']}")
-                    
-#             except Exception as e:
-#                 print(f"✗ 오류 발생: {str(e)}")
-#                 import traceback
-#                 traceback.print_exc()
-#                 results.append({
-#                     'image_path': str(image_path),
-#                     'found': False,
-#                     'error': str(e)
-#                 })
-        
-#         return results
-
-
-# def main():
-#     """메인 실행 함수"""
-#     import argparse
-    
-#     parser = argparse.ArgumentParser(
-#         description="컨테이너 이미지에서 일련번호를 인식합니다"
-#     )
-#     parser.add_argument(
-#         "image_path",
-#         type=str,
-#         help="컨테이너 이미지 파일 경로"
-#     )
-#     parser.add_argument(
-#         "--lang",
-#         type=str,
-#         default="en",
-#         help="인식 언어 (기본: en)"
-#     )
-    
-#     args = parser.parse_args()
-    
-#     # OCR 시스템 초기화
-#     ocr = ContainerOCR(lang=args.lang)
-    
-#     # 컨테이너 번호 추출
-#     result = ocr.extract_container_number(args.image_path)
-    
-#     # 결과 출력
-#     print("\n" + "="*60)
-#     print("컨테이너 번호 인식 결과")
-#     print("="*60)
-#     print(f"이미지: {result['image_path']}")
-    
-#     if result['found']:
-#         print(f"\n✓ 컨테이너 번호 발견!")
-#         print(f"  - 전체 번호: {result['container_number']}")
-#         print(f"  - 소유자 코드: {result['owner_code']}")
-#         print(f"  - 일련번호: {result['serial_number']}")
-#         print(f"  - 체크 디지트: {result['check_digit']}")
-#     else:
-#         print(f"\n✗ 컨테이너 번호를 찾을 수 없습니다")
-    
-#     print(f"\n원본 출력:\n{result['raw_output']}")
-#     print("="*60)
-
-
-# if __name__ == "__main__":
-#     main()
-
-
 """
-컨테이너 일련번호 인식 시스템 (CUDA 최적화 버전)
-Qwen3-VL을 사용하여 컨테이너 이미지에서 일련번호를 추출합니다.
-GPU(CUDA)가 있으면 자동으로 활용하여 빠른 처리 속도를 제공합니다.
+컨테이너 일련번호 인식 시스템
+HunyuanOCR을 사용하여 컨테이너 이미지에서 일련번호를 추출합니다.
 """
 
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
-from qwen_vl_utils import process_vision_info
+from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
 from PIL import Image
 import torch
 import re
@@ -265,43 +12,79 @@ from pathlib import Path
 from datetime import datetime
 
 
+def clean_repeated_substrings(text):
+    """Clean repeated substrings in text"""
+    n = len(text)
+    if n < 8000:
+        return text
+    for length in range(2, n // 10 + 1):
+        candidate = text[-length:] 
+        count = 0
+        i = n - length
+        
+        while i >= 0 and text[i:i + length] == candidate:
+            count += 1
+            i -= length
+
+        if count >= 10:
+            return text[:n - length * (count - 1)]  
+
+    return text
+
+
 class ContainerOCR:
-    """컨테이너 일련번호를 인식하는 클래스 (CUDA 자동 감지)"""
+    """컨테이너 일련번호를 인식하는 클래스"""
     
-    def __init__(self, model_name: str = "Qwen/Qwen3-VL-2B-Instruct"):
+    def __init__(self, model_name: str = "tencent/HunyuanOCR"):
         """
-        Qwen3-VL 초기화 (GPU 자동 감지)
+        HunyuanOCR 초기화
         
         Args:
-            model_name: 사용할 Qwen3-VL 모델
+            model_name: 사용할 HunyuanOCR 모델
         """
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Qwen3-VL 초기화 중: {model_name}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] HunyuanOCR 초기화 중: {model_name}")
         
         # GPU 사용 가능 여부 확인
         if torch.cuda.is_available():
             self.device = "cuda"
             gpu_name = torch.cuda.get_device_name(0)
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✓ CUDA 감지됨: {gpu_name}")
-            torch_dtype = torch.bfloat16  # GPU에서는 bfloat16 사용 (더 빠름)
+            use_dtype = torch.bfloat16
+            use_device_map = "auto"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✓ MPS(Apple Silicon) 감지됨")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠️  MPS는 bfloat16을 완전히 지원하지 않아 float32 사용")
+            use_dtype = torch.float32
+            use_device_map = None
         else:
             self.device = "cpu"
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠ CUDA를 사용할 수 없습니다. CPU 모드로 실행합니다.")
-            torch_dtype = torch.float32
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠ GPU를 사용할 수 없습니다. CPU 모드로 실행합니다.")
+            use_dtype = torch.float32
+            use_device_map = None
         
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 사용 디바이스: {self.device}, dtype: {torch_dtype}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 사용 디바이스: {self.device}, dtype: {use_dtype}")
         
-        # 모델과 프로세서 로드
-        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+        # 프로세서 로드
+        self.processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
+        
+        # 모델 로드
+        self.model = HunYuanVLForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
-            device_map=self.device
+            attn_implementation="eager",
+            torch_dtype=use_dtype if self.device == "cuda" else None,  # MPS/CPU는 None
+            device_map=use_device_map
         )
-        self.processor = AutoProcessor.from_pretrained(model_name)
+        
+        # MPS/CPU의 경우 명시적으로 float32로 변환 후 디바이스로 이동
+        if self.device in ["mps", "cpu"]:
+            self.model = self.model.float()  # 명시적으로 float32로 변환
+            self.model = self.model.to(self.device)
         
         # Inference mode로 설정 (속도 향상)
         self.model.eval()
         
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Qwen3-VL 초기화 완료!")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] HunyuanOCR 초기화 완료!")
     
     def extract_container_number(self, image_path: Union[str, Path]) -> Dict[str, any]:
         """
@@ -316,69 +99,68 @@ class ContainerOCR:
         # Path 객체를 문자열로 변환
         image_path_str = str(image_path)
         
-        # 프롬프트 구성 - ISO 6346 규격 명시
+        # 이미지 로드
+        image_inputs = Image.open(image_path_str)
+        
+        # 프롬프트 구성 - 영어로 컨테이너 번호 추출 요청
         messages = [
+            {"role": "system", "content": ""},
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image_path_str},
-                    {"type": "text", "text": """You are a precise OCR system for shipping container numbers.
+                    {"type": "text", "text": """Read all text visible on this shipping container.
 
-**CRITICAL RULES:**
-1. ONLY extract text that is ACTUALLY VISIBLE in this specific image
-2. DO NOT make up, guess, or generate random container numbers
-3. DO NOT use example numbers or placeholders
-4. If you cannot clearly see a complete container number, respond with: NONE
+Look for the container identification number painted on the container:
+- First part: 4 capital letters
+- Second part: 6 or 7 digits
+- Third part: 1 digit
 
-**Container Number Format (ISO 6346):**
-- Owner code: exactly 4 UPPERCASE letters
-- Serial number: exactly 6 digits
-- Check digit: exactly 1 digit
-- Example format: ABCD 123456 7
+IMPORTANT: Only return the actual text you see in THIS image. Do not make up or guess any numbers. If you cannot clearly read a complete container number in this image, say NONE.
 
-**Instructions:**
-- Look carefully at the image for text painted on the container
-- The text may be split across multiple lines or have irregular spacing
-- Extract ONLY what you can actually see in the image
-- Combine the parts to form: XXXX NNNNNN N
-- If the container number is incomplete, unclear, or not visible: respond with NONE
-- Your response must be ONLY the container number or NONE, nothing else
-
-**What you see in THIS image:**"""}
+Response format: Just write the letters and numbers with spaces, like: ABCD 1234567 8"""}
                 ]
             }
         ]
         
-        # 입력 준비
+        # 메시지 템플릿 적용
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        image_inputs, video_inputs = process_vision_info(messages)
+        
+        # 입력 준비
         inputs = self.processor(
             text=[text],
             images=image_inputs,
-            videos=video_inputs,
             padding=True,
             return_tensors="pt",
         )
-        inputs = inputs.to(self.device)
         
-        # 추론 - 짧은 출력으로 속도 향상
+        # 디바이스로 이동
+        device = next(self.model.parameters()).device
+        inputs = inputs.to(device)
+        
+        # 추론
         with torch.no_grad():
-            generated_ids = self.model.generate(
-                **inputs, 
-                max_new_tokens=50  # 컨테이너 번호는 짧으므로 축소
-            )
+            generated_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False)
         
         # 입력 제거하고 디코딩
+        if "input_ids" in inputs:
+            input_ids = inputs.input_ids
+        else:
+            input_ids = inputs.inputs
+            
         generated_ids_trimmed = [
-            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(input_ids, generated_ids)
         ]
-        response = self.processor.batch_decode(
-            generated_ids_trimmed, 
-            skip_special_tokens=True, 
-            clean_up_tokenization_spaces=False
-        )[0]
+        
+        response = clean_repeated_substrings(
+            self.processor.batch_decode(
+                generated_ids_trimmed, 
+                skip_special_tokens=True, 
+                clean_up_tokenization_spaces=False
+            )[0]
+        )
         
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 모델 출력: '{response}'")
         
@@ -392,7 +174,7 @@ class ContainerOCR:
     
     def extract_container_number_batch(self, image_paths: List[Union[str, Path]]) -> List[Dict[str, any]]:
         """
-        여러 이미지에서 컨테이너 일련번호를 한 번에 추출 (GPU 배치 추론)
+        여러 이미지를 하나의 프롬프트에 넣어서 한 번에 추론
         
         Args:
             image_paths: 컨테이너 이미지 경로 리스트
@@ -406,100 +188,125 @@ class ContainerOCR:
         # Path 객체를 문자열로 변환
         image_path_strs = [str(p) for p in image_paths]
         
-        # 각 이미지에 대한 메시지 생성
-        all_messages = []
-        prompt_text = """You are a precise OCR system for shipping container numbers.
-
-**CRITICAL RULES:**
-1. ONLY extract text that is ACTUALLY VISIBLE in this specific image
-2. DO NOT make up, guess, or generate random container numbers
-3. DO NOT use example numbers or placeholders
-4. If you cannot clearly see a complete container number, respond with: NONE
-
-**Container Number Format (ISO 6346):**
-- Owner code: exactly 4 UPPERCASE letters
-- Serial number: exactly 6 digits
-- Check digit: exactly 1 digit
-- Example format: ABCD 123456 7
-
-**Instructions:**
-- Look carefully at the image for text painted on the container
-- The text may be split across multiple lines or have irregular spacing
-- Extract ONLY what you can actually see in the image
-- Combine the parts to form: XXXX NNNNNN N
-- If the container number is incomplete, unclear, or not visible: respond with NONE
-- Your response must be ONLY the container number or NONE, nothing else
-
-**What you see in THIS image:**"""
+        # 이미지 로드
+        images = [Image.open(path) for path in image_path_strs]
         
-        for image_path_str in image_path_strs:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image_path_str},
-                        {"type": "text", "text": prompt_text}
-                    ]
-                }
-            ]
-            all_messages.append(messages)
+        # 하나의 메시지에 모든 이미지 포함
+        content = []
+        for idx, image_path_str in enumerate(image_path_strs, 1):
+            content.append({"type": "image", "image": image_path_str})
         
-        # 배치로 입력 준비
-        texts = []
-        all_image_inputs = []
-        all_video_inputs = []
+        # 텍스트 프롬프트 추가
+        content.append({
+            "type": "text", 
+            "text": f"""You are analyzing {len(images)} shipping container images.
+
+For EACH image, find the container identification number painted on the container:
+- First part: 4 capital letters
+- Second part: 6 or 7 digits
+- Third part: 1 digit
+
+IMPORTANT RULES:
+1. Analyze each image separately
+2. Return results for ALL {len(images)} images in order
+3. If an image has no clear container number, write "NONE" for that image
+4. Do not make up or guess numbers
+
+Response format (one line per image):
+Image 1: XXXX YYYYYYY Z
+Image 2: XXXX YYYYYYY Z
+Image 3: NONE
+...
+
+Analyze all {len(images)} images now:"""
+        })
         
-        for messages in all_messages:
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            texts.append(text)
-            image_inputs, video_inputs = process_vision_info(messages)
-            all_image_inputs.extend(image_inputs if image_inputs else [])
-            all_video_inputs.extend(video_inputs if video_inputs else [])
+        messages = [
+            {"role": "system", "content": ""},
+            {"role": "user", "content": content}
+        ]
         
-        # 배치로 프로세싱
+        # 메시지 템플릿 적용
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        
+        # 입력 준비
         inputs = self.processor(
-            text=texts,
-            images=all_image_inputs if all_image_inputs else None,
-            videos=all_video_inputs if all_video_inputs else None,
+            text=[text],
+            images=images,
             padding=True,
             return_tensors="pt",
         )
-        inputs = inputs.to(self.device)
         
-        # 배치 추론
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] GPU 배치 추론 시작: {len(image_paths)}개 이미지")
-        for idx, path in enumerate(image_path_strs, 1):
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   [{idx}] {Path(path).name}")
+        # 디바이스로 이동
+        device = next(self.model.parameters()).device
+        inputs = inputs.to(device)
+        
+        # 추론
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 추론 시작: {len(image_paths)}개 이미지를 하나의 프롬프트로")
         
         with torch.no_grad():
-            generated_ids = self.model.generate(
-                **inputs, 
-                max_new_tokens=50
-            )
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] GPU 배치 추론 완료")
+            generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
         
-        # 각 이미지별로 결과 디코딩
-        results = []
-        for idx, (image_path_str, in_ids, out_ids) in enumerate(zip(image_path_strs, inputs.input_ids, generated_ids)):
-            # 입력 제거하고 디코딩
-            generated_trimmed = out_ids[len(in_ids):]
-            response = self.processor.decode(
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 추론 완료")
+        
+        # 입력 제거하고 디코딩
+        if "input_ids" in inputs:
+            input_ids = inputs.input_ids
+        else:
+            input_ids = inputs.inputs
+        
+        generated_trimmed = generated_ids[0][len(input_ids[0]):]
+        response = clean_repeated_substrings(
+            self.processor.decode(
                 generated_trimmed, 
                 skip_special_tokens=True, 
                 clean_up_tokenization_spaces=False
             )
+        )
+        
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 전체 응답:\n{response}")
+        
+        # 응답 파싱 - "Image N:" 형식으로 분리
+        results = []
+        lines = response.split('\n')
+        
+        for idx, image_path_str in enumerate(image_path_strs, 1):
+            # 해당 이미지 번호의 응답 찾기
+            container_text = None
+            for line in lines:
+                if f"Image {idx}:" in line or f"image {idx}:" in line:
+                    container_text = line.split(':', 1)[1].strip() if ':' in line else line.strip()
+                    break
+            
+            if not container_text:
+                # 라인별로 순차적으로 파싱 시도
+                if idx - 1 < len(lines):
+                    container_text = lines[idx - 1].strip()
             
             filename = Path(image_path_str).name
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] [{idx+1}/{len(image_paths)}] {filename}: '{response}'")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] [{idx}/{len(image_paths)}] {filename}: '{container_text}'")
             
             # 컨테이너 번호 파싱
-            container_info = self._parse_container_number(response, [response])
-            container_info['raw_output'] = response
-            container_info['all_detected_text'] = [response]
-            container_info['image_path'] = image_path_str
+            if container_text:
+                container_info = self._parse_container_number(container_text, [container_text])
+                container_info['raw_output'] = container_text
+                container_info['all_detected_text'] = [container_text]
+            else:
+                container_info = {
+                    'container_number': None,
+                    'owner_code': None,
+                    'serial_number': None,
+                    'check_digit': None,
+                    'check_digit_valid': None,
+                    'calculated_check_digit': None,
+                    'found': False,
+                    'raw_output': 'No response',
+                    'all_detected_text': []
+                }
             
+            container_info['image_path'] = image_path_str
             results.append(container_info)
         
         return results
@@ -600,14 +407,13 @@ class ContainerOCR:
             'found': False
         }
     
-    def process_batch(self, image_paths: List[Union[str, Path]]) -> List[Dict[str, any]]:
+    def process_batch(self, image_paths: List[Union[str, Path]], batch_size: int = None) -> List[Dict[str, any]]:
         """
         여러 이미지를 배치로 처리
-        GPU 모드: 배치 추론으로 한 번에 처리
-        CPU 모드: 순차적으로 하나씩 처리
         
         Args:
             image_paths: 이미지 경로 리스트
+            batch_size: 배치 크기 (None이면 전체를 한 번에 처리)
             
         Returns:
             추출된 컨테이너 정보 리스트
@@ -615,31 +421,36 @@ class ContainerOCR:
         if not image_paths:
             return []
         
-        try:
-            # GPU 사용 시: 배치 추론으로 한 번에 처리
-            if self.device == "cuda":
-                results = self.extract_container_number_batch(image_paths)
-                return results
+        # batch_size가 None이면 전체를 한 번에 처리
+        if batch_size is None:
+            batch_size = len(image_paths)
+        
+        results = []
+        
+        # 배치 단위로 처리
+        for i in range(0, len(image_paths), batch_size):
+            batch_paths = image_paths[i:i + batch_size]
             
-            # CPU 사용 시: 순차적으로 하나씩 처리
-            else:
-                results = []
-                for image_path in image_paths:
-                    result = self.extract_container_number(image_path)
-                    results.append(result)
-                return results
-                    
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✗ 배치 처리 오류 발생: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            
-            # 오류 발생 시 빈 결과 반환
-            return [{
-                'image_path': str(image_path),
-                'found': False,
-                'error': str(e)
-            } for image_path in image_paths]
+            try:
+                # 배치 추론 사용
+                batch_results = self.extract_container_number_batch(batch_paths)
+                results.extend(batch_results)
+            except Exception as e:
+                # 배치 처리 실패 시 개별 처리로 폴백
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠️  배치 처리 실패, 개별 처리로 전환: {str(e)}")
+                for image_path in batch_paths:
+                    try:
+                        result = self.extract_container_number(image_path)
+                        results.append(result)
+                    except Exception as e2:
+                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✗ 이미지 처리 오류: {Path(image_path).name} - {str(e2)}")
+                        results.append({
+                            'image_path': str(image_path),
+                            'found': False,
+                            'error': str(e2)
+                        })
+        
+        return results
 
 
 def main():
@@ -647,7 +458,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="컨테이너 이미지에서 일련번호를 인식합니다 (CUDA 자동 감지)"
+        description="컨테이너 이미지에서 일련번호를 인식합니다 (HunyuanOCR)"
     )
     parser.add_argument(
         "image_path",

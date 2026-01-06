@@ -21,11 +21,8 @@ def process_folder(folder_path: str, output_file: str = "results.txt"):
     # OCR 시스템 초기화
     ocr = ContainerOCR()
     
-    # 디바이스에 따라 배치 크기 설정
-    # GPU: 배치 처리로 성능 향상
-    # CPU: 순차 처리로 안정성 확보
-    batch_size = 4 if ocr.device == "cuda" else 1
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 처리 모드: {ocr.device.upper()} (배치 크기: {batch_size})\n")
+    # 트럭별로 전체 이미지를 한꺼번에 처리 (배치 추론 활용)
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 처리 모드: {ocr.device.upper()} (트럭별 전체 배치 처리)\n")
     
     # 이미지 파일 찾기
     folder = Path(folder_path)
@@ -63,16 +60,15 @@ def process_folder(folder_path: str, output_file: str = "results.txt"):
         
         valid_containers = set()  # 유효한 컨테이너 번호 (중복 제거)
         
-        # 배치 단위로 이미지 처리
-        for i in range(0, len(images), batch_size):
-            batch = images[i:i + batch_size]
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   배치 처리: {len(batch)}개 이미지 ({i+1}~{min(i+batch_size, len(images))})")
-            
-            # 배치로 한 번에 처리
-            results = ocr.process_batch(batch)
+        # 트럭의 모든 이미지를 한꺼번에 배치 처리
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]   배치 처리: {len(images)}개 이미지 한꺼번에 처리")
+        
+        try:
+            # 트럭별 전체 이미지를 한 번에 처리 (batch_size=None)
+            results = ocr.process_batch(images, batch_size=None)
             
             # 결과 처리
-            for img_path, result in zip(batch, results):
+            for img_path, result in zip(images, results):
                 if result.get('found', False):
                     # container_ocr에서 이미 체크디지트 검증을 수행함
                     is_valid = result.get('check_digit_valid', False)
@@ -86,6 +82,8 @@ def process_folder(folder_path: str, output_file: str = "results.txt"):
                         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]     ✗ {img_path.name}: {result['container_number']} (체크디지트 오류, 계산값: {calculated})")
                 else:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]     - {img_path.name}: 인식 실패 (raw: {result.get('raw_output', 'N/A')})")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✗ 트럭 {truck_id} 처리 실패: {str(e)}")
         
         # 최대 2개까지만 저장
         if valid_containers:

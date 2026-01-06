@@ -1,17 +1,40 @@
 # container-ocr
 
-Automated container number recognition using Qwen3-VL.
+Automated container number recognition using HunyuanOCR.
+
+## Features
+
+- **Lightweight**: HunyuanOCR with only 1B parameters
+- **Fast**: Optimized for real-time OCR tasks
+- **Accurate**: State-of-the-art performance on multilingual documents
+- **Hardware Support**: CUDA (NVIDIA GPU), MPS (Apple Silicon), and CPU
 
 ## Installation
+
+### Step 1: Install transformers from specific commit
+
+```bash
+pip install git+https://github.com/huggingface/transformers@82a06db03535c49aa987719ed0746a76093b1ec4
+```
+
+### Step 2: Install other dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-For CUDA/GPU support:
+### Optional: CUDA/GPU support
+
+For NVIDIA GPU:
 
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+```
+
+For CPU or Apple Silicon (MPS):
+
+```bash
+pip install torch torchvision torchaudio
 ```
 
 ## Usage
@@ -39,3 +62,10 @@ python batch_process.py ./image --output results.txt
 ```bash
 python container_ocr.py image.jpg
 ```
+
+## Model Information
+
+- **Model**: [tencent/HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR)
+- **Size**: 1B parameters
+- **Features**: OCR expert VLM with multilingual support
+- **Applications**: Text spotting, information extraction, document parsing

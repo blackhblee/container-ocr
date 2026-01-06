@@ -1,16 +1,17 @@
-# Qwen3-VL and CUDA support
+# HunyuanOCR
+# Note: transformers need to be installed from specific commit for HunyuanOCR support
+# pip install git+https://github.com/huggingface/transformers@82a06db03535c49aa987719ed0746a76093b1ec4
 transformers>=4.37.0
 pillow>=10.0.0
 accelerate>=0.20.0
-qwen-vl-utils
 opencv-python>=4.8.0
 sentencepiece
 
-# PyTorch - CUDA version (Windows GPU environment)
-# For GPU environment, install with:
+# PyTorch - supports CUDA, MPS (Apple Silicon), and CPU
+# For CUDA (NVIDIA GPU):
 # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 # 
-# For CPU-only environment (Mac, etc.):
+# For CPU-only or MPS (Mac):
 # pip install torch torchvision torchaudio
 #
 # When installing from requirements.txt:
