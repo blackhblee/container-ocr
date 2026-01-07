@@ -1,9 +1,9 @@
 """
 컨테이너 일련번호 인식 시스템
-HunyuanOCR을 사용하여 컨테이너 이미지에서 일련번호를 추출합니다.
+Florence-2를 사용하여 컨테이너 이미지에서 일련번호를 추출합니다.
 """
 
-from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
+from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image
 import torch
 import re
@@ -35,14 +35,14 @@ def clean_repeated_substrings(text):
 class ContainerOCR:
     """컨테이너 일련번호를 인식하는 클래스"""
     
-    def __init__(self, model_name: str = "tencent/HunyuanOCR"):
+    def __init__(self, model_name: str = "microsoft/Florence-2-large"):
         """
-        HunyuanOCR 초기화
+        Florence-2 모델 초기화
         
         Args:
-            model_name: 사용할 HunyuanOCR 모델
+            model_name: 사용할 Florence-2 모델
         """
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] HunyuanOCR 초기화 중: {model_name}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Florence-2 모델 초기화 중: {model_name}")
         
         # GPU 사용 가능 여부 확인
         if torch.cuda.is_available():
@@ -66,25 +66,26 @@ class ContainerOCR:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 사용 디바이스: {self.device}, dtype: {use_dtype}")
         
         # 프로세서 로드
-        self.processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
         
         # 모델 로드
-        self.model = HunYuanVLForConditionalGeneration.from_pretrained(
+        self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            attn_implementation="eager",
-            torch_dtype=use_dtype if self.device == "cuda" else None,  # MPS/CPU는 None
-            device_map=use_device_map
+            torch_dtype=use_dtype if self.device == "cuda" else None,
+            device_map=use_device_map,
+            trust_remote_code=True,
+            attn_implementation="eager"
         )
         
         # MPS/CPU의 경우 명시적으로 float32로 변환 후 디바이스로 이동
         if self.device in ["mps", "cpu"]:
-            self.model = self.model.float()  # 명시적으로 float32로 변환
+            self.model = self.model.float()
             self.model = self.model.to(self.device)
         
         # Inference mode로 설정 (속도 향상)
         self.model.eval()
         
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] HunyuanOCR 초기화 완료!")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Florence-2 모델 초기화 완료!")
     
     def extract_container_number(self, image_path: Union[str, Path]) -> Dict[str, any]:
         """
@@ -100,67 +101,48 @@ class ContainerOCR:
         image_path_str = str(image_path)
         
         # 이미지 로드
-        image_inputs = Image.open(image_path_str)
+        image = Image.open(image_path_str)
         
-        # 프롬프트 구성 - 영어로 컨테이너 번호 추출 요청
-        messages = [
-            {"role": "system", "content": ""},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image_path_str},
-                    {"type": "text", "text": """Read all text visible on this shipping container.
-
-Look for the container identification number painted on the container:
-- First part: 4 capital letters
-- Second part: 6 or 7 digits
-- Third part: 1 digit
-
-IMPORTANT: Only return the actual text you see in THIS image. Do not make up or guess any numbers. If you cannot clearly read a complete container number in this image, say NONE.
-
-Response format: Just write the letters and numbers with spaces, like: ABCD 1234567 8"""}
-                ]
-            }
-        ]
+        # Florence-2의 OCR with region 태스크 사용
+        task_prompt = "<OCR_WITH_REGION>"
         
-        # 메시지 템플릿 적용
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        # 디바이스 및 dtype 확인
+        device = next(self.model.parameters()).device
+        torch_dtype = next(self.model.parameters()).dtype
         
         # 입력 준비
-        inputs = self.processor(
-            text=[text],
-            images=image_inputs,
-            padding=True,
-            return_tensors="pt",
-        )
-        
-        # 디바이스로 이동
-        device = next(self.model.parameters()).device
-        inputs = inputs.to(device)
+        inputs = self.processor(text=task_prompt, images=image, return_tensors="pt").to(device, torch_dtype)
         
         # 추론
         with torch.no_grad():
-            generated_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False)
+            generated_ids = self.model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+                do_sample=False,
+                use_cache=False
+            )
         
-        # 입력 제거하고 디코딩
-        if "input_ids" in inputs:
-            input_ids = inputs.input_ids
-        else:
-            input_ids = inputs.inputs
-            
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):] for in_ids, out_ids in zip(input_ids, generated_ids)
-        ]
+        # 디코딩
+        generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
         
-        response = clean_repeated_substrings(
-            self.processor.batch_decode(
-                generated_ids_trimmed, 
-                skip_special_tokens=True, 
-                clean_up_tokenization_spaces=False
-            )[0]
+        # 후처리하여 실제 응답 추출
+        parsed_answer = self.processor.post_process_generation(
+            generated_text,
+            task=task_prompt,
+            image_size=(image.width, image.height)
         )
+        
+        # OCR 결과에서 텍스트만 추출
+        ocr_result = parsed_answer.get(task_prompt, '')
+        if isinstance(ocr_result, dict):
+            detected_texts = ocr_result.get('labels', [])
+            full_text = ' '.join(detected_texts) if detected_texts else ''
+        else:
+            full_text = str(ocr_result) if ocr_result else ''
+        
+        response = full_text
         
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 모델 출력: '{response}'")
         
@@ -174,7 +156,7 @@ Response format: Just write the letters and numbers with spaces, like: ABCD 1234
     
     def extract_container_number_batch(self, image_paths: List[Union[str, Path]]) -> List[Dict[str, any]]:
         """
-        여러 이미지를 하나의 프롬프트에 넣어서 한 번에 추론
+        여러 이미지를 배치로 처리 (GPU에 동시 로드하여 병렬 처리)
         
         Args:
             image_paths: 컨테이너 이미지 경로 리스트
@@ -185,131 +167,106 @@ Response format: Just write the letters and numbers with spaces, like: ABCD 1234
         if not image_paths:
             return []
         
-        # Path 객체를 문자열로 변환
-        image_path_strs = [str(p) for p in image_paths]
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 처리 시작: {len(image_paths)}개 이미지를 한 번에 처리")
         
-        # 이미지 로드
-        images = [Image.open(path) for path in image_path_strs]
-        
-        # 하나의 메시지에 모든 이미지 포함
-        content = []
-        for idx, image_path_str in enumerate(image_path_strs, 1):
-            content.append({"type": "image", "image": image_path_str})
-        
-        # 텍스트 프롬프트 추가
-        content.append({
-            "type": "text", 
-            "text": f"""You are analyzing {len(images)} shipping container images.
-
-For EACH image, find the container identification number painted on the container:
-- First part: 4 capital letters
-- Second part: 6 or 7 digits
-- Third part: 1 digit
-
-IMPORTANT RULES:
-1. Analyze each image separately
-2. Return results for ALL {len(images)} images in order
-3. If an image has no clear container number, write "NONE" for that image
-4. Do not make up or guess numbers
-
-Response format (one line per image):
-Image 1: XXXX YYYYYYY Z
-Image 2: XXXX YYYYYYY Z
-Image 3: NONE
-...
-
-Analyze all {len(images)} images now:"""
-        })
-        
-        messages = [
-            {"role": "system", "content": ""},
-            {"role": "user", "content": content}
-        ]
-        
-        # 메시지 템플릿 적용
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        
-        # 입력 준비
-        inputs = self.processor(
-            text=[text],
-            images=images,
-            padding=True,
-            return_tensors="pt",
-        )
-        
-        # 디바이스로 이동
-        device = next(self.model.parameters()).device
-        inputs = inputs.to(device)
-        
-        # 추론
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 추론 시작: {len(image_paths)}개 이미지를 하나의 프롬프트로")
-        
-        with torch.no_grad():
-            generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
-        
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 추론 완료")
-        
-        # 입력 제거하고 디코딩
-        if "input_ids" in inputs:
-            input_ids = inputs.input_ids
-        else:
-            input_ids = inputs.inputs
-        
-        generated_trimmed = generated_ids[0][len(input_ids[0]):]
-        response = clean_repeated_substrings(
-            self.processor.decode(
-                generated_trimmed, 
-                skip_special_tokens=True, 
-                clean_up_tokenization_spaces=False
-            )
-        )
-        
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 전체 응답:\n{response}")
-        
-        # 응답 파싱 - "Image N:" 형식으로 분리
-        results = []
-        lines = response.split('\n')
-        
-        for idx, image_path_str in enumerate(image_path_strs, 1):
-            # 해당 이미지 번호의 응답 찾기
-            container_text = None
-            for line in lines:
-                if f"Image {idx}:" in line or f"image {idx}:" in line:
-                    container_text = line.split(':', 1)[1].strip() if ':' in line else line.strip()
-                    break
+        try:
+            # 이미지 로드
+            image_path_strs = [str(p) for p in image_paths]
+            images = [Image.open(path) for path in image_path_strs]
             
-            if not container_text:
-                # 라인별로 순차적으로 파싱 시도
-                if idx - 1 < len(lines):
-                    container_text = lines[idx - 1].strip()
+            # Florence-2의 OCR with region 태스크 사용
+            task_prompt = "<OCR_WITH_REGION>"
             
-            filename = Path(image_path_str).name
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] [{idx}/{len(image_paths)}] {filename}: '{container_text}'")
+            # 디바이스 및 dtype 확인
+            device = next(self.model.parameters()).device
+            torch_dtype = next(self.model.parameters()).dtype
             
-            # 컨테이너 번호 파싱
-            if container_text:
-                container_info = self._parse_container_number(container_text, [container_text])
-                container_info['raw_output'] = container_text
-                container_info['all_detected_text'] = [container_text]
-            else:
-                container_info = {
-                    'container_number': None,
-                    'owner_code': None,
-                    'serial_number': None,
-                    'check_digit': None,
-                    'check_digit_valid': None,
-                    'calculated_check_digit': None,
-                    'found': False,
-                    'raw_output': 'No response',
-                    'all_detected_text': []
-                }
+            # 배치 입력 준비 - 모든 이미지에 동일한 프롬프트 적용
+            inputs = self.processor(
+                text=[task_prompt] * len(images),
+                images=images,
+                return_tensors="pt",
+                padding=True
+            ).to(device, torch_dtype)
             
-            container_info['image_path'] = image_path_str
-            results.append(container_info)
-        
-        return results
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 추론 실행 중...")
+            
+            # 배치 추론
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    input_ids=inputs["input_ids"],
+                    pixel_values=inputs["pixel_values"],
+                    max_new_tokens=1024,
+                    num_beams=3,
+                    do_sample=False,
+                    use_cache=False
+                )
+            
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 디코딩 중...")
+            
+            # 각 이미지별로 결과 처리
+            results = []
+            for idx, (image, image_path_str) in enumerate(zip(images, image_path_strs)):
+                filename = Path(image_path_str).name
+                
+                # 개별 이미지의 생성 결과 디코딩
+                generated_text = self.processor.batch_decode(
+                    generated_ids[idx:idx+1], 
+                    skip_special_tokens=False
+                )[0]
+                
+                # 후처리하여 실제 응답 추출
+                parsed_answer = self.processor.post_process_generation(
+                    generated_text,
+                    task=task_prompt,
+                    image_size=(image.width, image.height)
+                )
+                
+                # OCR 결과에서 텍스트만 추출
+                ocr_result = parsed_answer.get(task_prompt, '')
+                if isinstance(ocr_result, dict):
+                    detected_texts = ocr_result.get('labels', [])
+                    full_text = ' '.join(detected_texts) if detected_texts else ''
+                else:
+                    full_text = str(ocr_result) if ocr_result else ''
+                
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] [{idx+1}/{len(image_paths)}] {filename}: '{full_text[:100]}...'")
+                
+                # 컨테이너 번호 파싱
+                container_info = self._parse_container_number(full_text, [full_text])
+                container_info['raw_output'] = full_text
+                container_info['all_detected_text'] = [full_text]
+                container_info['image_path'] = image_path_str
+                
+                results.append(container_info)
+            
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] 배치 처리 완료")
+            return results
+            
+        except Exception as e:
+            # 배치 처리 실패 시 개별 처리로 폴백
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ⚠️  배치 처리 실패, 개별 처리로 전환: {str(e)}")
+            results = []
+            for image_path in image_paths:
+                try:
+                    result = self.extract_container_number(image_path)
+                    results.append(result)
+                except Exception as e2:
+                    filename = Path(image_path).name
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✗ 이미지 처리 오류: {filename} - {str(e2)}")
+                    results.append({
+                        'image_path': str(image_path),
+                        'container_number': None,
+                        'owner_code': None,
+                        'serial_number': None,
+                        'check_digit': None,
+                        'check_digit_valid': None,
+                        'calculated_check_digit': None,
+                        'found': False,
+                        'raw_output': f'Error: {str(e2)}',
+                        'all_detected_text': []
+                    })
+            return results
     
     def _calculate_check_digit(self, owner_code: str, serial_number: str) -> int:
         """
@@ -458,7 +415,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="컨테이너 이미지에서 일련번호를 인식합니다 (HunyuanOCR)"
+        description="컨테이너 이미지에서 일련번호를 인식합니다 (Florence-2)"
     )
     parser.add_argument(
         "image_path",
