@@ -10,16 +10,17 @@ from collections import defaultdict
 from datetime import datetime
 
 
-def process_folder(folder_path: str, output_file: str = "results.txt"):
+def process_folder(folder_path: str, output_file: str = "results.txt", lora_path: str = None):
     """
     폴더 내의 모든 이미지를 처리하고 트럭별로 그룹화
     
     Args:
         folder_path: 이미지가 있는 폴더 경로
         output_file: 결과를 저장할 TXT 파일 (기본: results.txt)
+        lora_path: 파인튜닝된 LoRA 모델 경로 (옵션)
     """
     # OCR 시스템 초기화
-    ocr = ContainerOCR()
+    ocr = ContainerOCR(lora_path=lora_path)
     
     # 트럭별로 전체 이미지를 한꺼번에 처리 (배치 추론 활용)
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 처리 모드: {ocr.device.upper()} (트럭별 전체 배치 처리)\n")
@@ -131,6 +132,12 @@ if __name__ == "__main__":
         default="results.txt",
         help="결과를 저장할 TXT 파일 (기본: results.txt)"
     )
+    parser.add_argument(
+        "--lora",
+        type=str,
+        default=None,
+        help="파인튜닝된 LoRA 모델 경로 (옵션)"
+    )
     
     args = parser.parse_args()
-    process_folder(args.folder_path, args.output)
+    process_folder(args.folder_path, args.output, args.lora)

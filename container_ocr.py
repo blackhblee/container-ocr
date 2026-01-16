@@ -4,10 +4,11 @@ Florence-2를 사용하여 컨테이너 이미지에서 일련번호를 추출�
 """
 
 from transformers import AutoProcessor, AutoModelForCausalLM
+from peft import PeftModel
 from PIL import Image
 import torch
 import re
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Optional
 from pathlib import Path
 from datetime import datetime
 
@@ -35,14 +36,17 @@ def clean_repeated_substrings(text):
 class ContainerOCR:
     """컨테이너 일련번호를 인식하는 클래스"""
     
-    def __init__(self, model_name: str = "microsoft/Florence-2-large"):
+    def __init__(self, model_name: str = "microsoft/Florence-2-large", lora_path: Optional[str] = None):
         """
         Florence-2 모델 초기화
         
         Args:
-            model_name: 사용할 Florence-2 모델
+            model_name: 사용할 Florence-2 기본 모델
+            lora_path: 파인튜닝된 LoRA 모델 경로 (옵션)
         """
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Florence-2 모델 초기화 중: {model_name}")
+        if lora_path:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 파인튜닝된 LoRA 모델 사용: {lora_path}")
         
         # GPU 사용 가능 여부 확인
         if torch.cuda.is_available():
@@ -81,6 +85,13 @@ class ContainerOCR:
         if self.device in ["mps", "cpu"]:
             self.model = self.model.float()
             self.model = self.model.to(self.device)
+        
+        # LoRA 모델이 지정된 경우 로드
+        if lora_path:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] LoRA 가중치 로드 중...")
+            self.model = PeftModel.from_pretrained(self.model, lora_path)
+            self.model = self.model.merge_and_unload()  # LoRA 가중치를 기본 모델에 병합
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✓ LoRA 가중치 로드 완료")
         
         # Inference mode로 설정 (속도 향상)
         self.model.eval()
